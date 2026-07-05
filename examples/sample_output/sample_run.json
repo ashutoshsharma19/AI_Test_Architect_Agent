@@ -1,0 +1,491 @@
+{
+  "raw_input": "The user login system shall allow registered users to log in using\nemail and password. The system shall lock the account after 3\nconsecutive failed login attempts. Password must be minimum 8\ncharacters with at least one uppercase, one number, and one special\ncharacter. The system shall send a password reset email within\n2 minutes of request. Session shall expire after 30 minutes of\ninactivity.",
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "text": "Allow registered users to log in using email and password.",
+      "type": "functional"
+    },
+    {
+      "id": "REQ-002",
+      "text": "Lock user account after 3 consecutive failed login attempts.",
+      "type": "functional"
+    },
+    {
+      "id": "REQ-003",
+      "text": "Enforce password rules: minimum 8 chars, 1 uppercase, 1 number, 1 special char.",
+      "type": "functional"
+    },
+    {
+      "id": "REQ-004",
+      "text": "Send password reset email within 2 minutes of request.",
+      "type": "functional"
+    },
+    {
+      "id": "REQ-005",
+      "text": "Expire user session after 30 minutes of inactivity.",
+      "type": "functional"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "BR-001",
+      "name": "Account Lockout Policy",
+      "description": "Lock account on the 3rd consecutive failed attempt. Reset attempt counter on success."
+    },
+    {
+      "id": "BR-002",
+      "name": "Password Strength Criteria",
+      "description": "Passwords must have >= 8 chars, >= 1 uppercase letter, >= 1 numeric digit, and >= 1 special character."
+    },
+    {
+      "id": "BR-003",
+      "name": "Inactivity Timeout",
+      "description": "Sessions expire after 30 minutes of no user activity."
+    }
+  ],
+  "entities": [
+    {
+      "name": "User Profile",
+      "attributes": [
+        "email",
+        "password",
+        "status",
+        "failed_attempts"
+      ],
+      "relationships": [
+        "Creates User Session"
+      ]
+    },
+    {
+      "name": "User Session",
+      "attributes": [
+        "session_id",
+        "created_at",
+        "last_active"
+      ],
+      "relationships": [
+        "Belongs to User Profile"
+      ]
+    },
+    {
+      "name": "Reset Request",
+      "attributes": [
+        "reset_id",
+        "email",
+        "timestamp",
+        "sent_status"
+      ],
+      "relationships": [
+        "Associated with User Profile"
+      ]
+    }
+  ],
+  "validations": [
+    {
+      "id": "VAL-001",
+      "target": "Email Login",
+      "rule": "Ensure email matches standard format and password matches database hash."
+    },
+    {
+      "id": "VAL-002",
+      "target": "Failed Login Counter",
+      "rule": "Increment failed_attempts on failure. If failed_attempts >= 3, set status to LOCKED."
+    },
+    {
+      "id": "VAL-003",
+      "target": "Password Strength Validator",
+      "rule": "Verify password input contains 8+ characters, uppercase, number, and special character."
+    }
+  ],
+  "assumptions": [
+    "Account status resets to active after a password reset or admin intervention.",
+    "Inactivity is defined as no HTTP/API requests from the client session."
+  ],
+  "ambiguities": [
+    "How long does the account remain locked? Is it a timed lockout or indefinite until reset?",
+    "What special characters are permitted in the password?"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "SC-001",
+      "req_id": "REQ-001",
+      "type": "functional",
+      "title": "Successful Login",
+      "description": "Verify that a user with valid email and password can log in successfully."
+    },
+    {
+      "scenario_id": "SC-002",
+      "req_id": "REQ-002",
+      "type": "negative",
+      "title": "Account Lockout on Consecutive Failures",
+      "description": "Verify that the account locks after 3 failed login attempts and rejects the 4th attempt even with correct password."
+    },
+    {
+      "scenario_id": "SC-003",
+      "req_id": "REQ-003",
+      "type": "boundary",
+      "title": "Boundary Check for Password Rules",
+      "description": "Test passwords with less than 8 characters, and passwords lacking required character types."
+    },
+    {
+      "scenario_id": "SC-004",
+      "req_id": "REQ-004",
+      "type": "integration",
+      "title": "Password Reset Email Delivery",
+      "description": "Trigger password reset and verify reset email arrives within 2 minutes."
+    },
+    {
+      "scenario_id": "SC-005",
+      "req_id": "REQ-001",
+      "type": "security",
+      "title": "SQL Injection Login Bypass Check",
+      "description": "Test entering SQL injection payloads in email and password fields to verify auth cannot be bypassed."
+    }
+  ],
+  "test_cases": [
+    {
+      "test_case_id": "TC-001",
+      "scenario_id": "SC-001",
+      "req_id": "REQ-001",
+      "title": "Perform login with valid credentials",
+      "priority": "P1",
+      "preconditions": "User is registered with email 'qa_tester@example.com' and password 'P@ssword1'.",
+      "test_type": "playwright",
+      "steps": [
+        {
+          "step_number": 1,
+          "action": "Navigate to the Login page.",
+          "expected_result": "Login form is displayed."
+        },
+        {
+          "step_number": 2,
+          "action": "Enter 'qa_tester@example.com' in the Email field.",
+          "expected_result": "Email field contains input."
+        },
+        {
+          "step_number": 3,
+          "action": "Enter 'P@ssword1' in the Password field.",
+          "expected_result": "Password field contains input masked."
+        },
+        {
+          "step_number": 4,
+          "action": "Click the Login button.",
+          "expected_result": "User is redirected to the home dashboard page."
+        }
+      ],
+      "test_data": {
+        "email": "qa_tester@example.com",
+        "password": "P@ssword1"
+      },
+      "sql_query": "SELECT email, status FROM users WHERE email='qa_tester@example.com';"
+    },
+    {
+      "test_case_id": "TC-002",
+      "scenario_id": "SC-002",
+      "req_id": "REQ-002",
+      "title": "Account lockout after 3 failed attempts",
+      "priority": "P1",
+      "preconditions": "User account 'qa_tester@example.com' is in ACTIVE status.",
+      "test_type": "pytest",
+      "steps": [
+        {
+          "step_number": 1,
+          "action": "Attempt login with password 'WrongPass1'.",
+          "expected_result": "Login fails. Error alert shown. Failed attempts = 1."
+        },
+        {
+          "step_number": 2,
+          "action": "Attempt login with password 'WrongPass2'.",
+          "expected_result": "Login fails. Error alert shown. Failed attempts = 2."
+        },
+        {
+          "step_number": 3,
+          "action": "Attempt login with password 'WrongPass3'.",
+          "expected_result": "Login fails. Account lockout message is displayed. Status = LOCKED."
+        },
+        {
+          "step_number": 4,
+          "action": "Attempt login with valid password 'P@ssword1'.",
+          "expected_result": "Login fails with message: 'Account is locked.'"
+        }
+      ],
+      "test_data": {
+        "email": "qa_tester@example.com",
+        "wrong_passwords": [
+          "WrongPass1",
+          "WrongPass2",
+          "WrongPass3"
+        ],
+        "valid_password": "P@ssword1"
+      },
+      "sql_query": "SELECT failed_attempts, status FROM users WHERE email='qa_tester@example.com';"
+    },
+    {
+      "test_case_id": "TC-003",
+      "scenario_id": "SC-003",
+      "req_id": "REQ-003",
+      "title": "Enforce password validation constraints on signup",
+      "priority": "P2",
+      "preconditions": "User is on the Registration page.",
+      "test_type": "pytest",
+      "steps": [
+        {
+          "step_number": 1,
+          "action": "Enter password 'Short1!'.",
+          "expected_result": "Validation fails. Reason: Minimum 8 characters required."
+        },
+        {
+          "step_number": 2,
+          "action": "Enter password 'no_uppercase1!'.",
+          "expected_result": "Validation fails. Reason: At least one uppercase letter required."
+        },
+        {
+          "step_number": 3,
+          "action": "Enter password 'NO_LOWERCASE1!'.",
+          "expected_result": "Validation passes (rule only requires 1 uppercase, 1 number, 1 special)."
+        },
+        {
+          "step_number": 4,
+          "action": "Enter password 'ValidP@ss1'.",
+          "expected_result": "Validation passes. Form allows submission."
+        }
+      ],
+      "test_data": {
+        "passwords": [
+          "Short1!",
+          "no_uppercase1!",
+          "ValidP@ss1"
+        ]
+      },
+      "sql_query": null
+    },
+    {
+      "test_case_id": "TC-004",
+      "scenario_id": "SC-004",
+      "req_id": "REQ-004",
+      "title": "Send password reset email within 2 mins of request",
+      "priority": "P2",
+      "preconditions": "User exists with email 'qa_tester@example.com'.",
+      "test_type": "karate",
+      "steps": [
+        {
+          "step_number": 1,
+          "action": "Send POST request to '/api/auth/reset-password' with payload { 'email': 'qa_tester@example.com' }.",
+          "expected_result": "HTTP status 200 OK."
+        },
+        {
+          "step_number": 2,
+          "action": "Poll test email inbox API and verify reset email is received within 120 seconds.",
+          "expected_result": "Email is present and contains reset token link."
+        }
+      ],
+      "test_data": {
+        "email": "qa_tester@example.com",
+        "max_wait_seconds": 120
+      },
+      "sql_query": "SELECT sent_at FROM password_resets WHERE email='qa_tester@example.com' ORDER BY sent_at DESC LIMIT 1;"
+    },
+    {
+      "test_case_id": "TC-005",
+      "scenario_id": "SC-005",
+      "req_id": "REQ-001",
+      "title": "Validate authentication SQL Injection resilience",
+      "priority": "P1",
+      "preconditions": "User is on the login page.",
+      "test_type": "manual",
+      "steps": [
+        {
+          "step_number": 1,
+          "action": "Enter 'admin@example.com' OR '1'='1' in Email field.",
+          "expected_result": "Login rejects payload with validation error."
+        },
+        {
+          "step_number": 2,
+          "action": "Enter 'blah' OR 1=1 -- in Password field.",
+          "expected_result": "Login rejects payload with validation error."
+        }
+      ],
+      "test_data": {
+        "payloads": [
+          "' OR '1'='1",
+          "' OR 1=1 --"
+        ]
+      },
+      "sql_query": null
+    }
+  ],
+  "rtm": {
+    "REQ-001": [
+      "TC-001",
+      "TC-005"
+    ],
+    "REQ-002": [
+      "TC-002"
+    ],
+    "REQ-003": [
+      "TC-003"
+    ],
+    "REQ-004": [
+      "TC-004"
+    ],
+    "REQ-005": []
+  },
+  "coverage_gaps": [
+    "REQ-005"
+  ],
+  "automation_scripts": {
+    "TC-001": {
+      "framework": "playwright",
+      "script": "from playwright.sync_api import sync_playwright\n\ndef test_user_login():\n    with sync_playwright() as p:\n        browser = p.chromium.launch(headless=True)\n        page = browser.new_page()\n        page.goto('https://example.com/login')\n        page.fill('input[type=\"email\"]', 'qa_tester@example.com')\n        page.fill('input[type=\"password\"]', 'P@ssword1')\n        page.click('button[type=\"submit\"]')\n        # Assert redirection\n        page.wait_for_url('https://example.com/dashboard')\n        assert page.url == 'https://example.com/dashboard'\n        browser.close()\n"
+    },
+    "TC-002": {
+      "framework": "pytest",
+      "script": "import pytest\nimport requests\n\ndef test_account_lockout():\n    # Step 1-3: Consecutive failed attempts\n    url = 'https://example.com/api/auth/login'\n    for i in range(3):\n        res = requests.post(url, json={'email': 'qa_tester@example.com', 'password': f'WrongPass{i}'})\n        assert res.status_code == 401\n        assert 'Invalid credentials' in res.json()['message']\n\n    # Step 4: Correct password attempt should fail due to lockout\n    res = requests.post(url, json={'email': 'qa_tester@example.com', 'password': 'P@ssword1'})\n    assert res.status_code == 423\n    assert 'Account is locked' in res.json()['message']\n"
+    },
+    "TC-003": {
+      "framework": "pytest",
+      "script": "import pytest\nfrom utils.validators import validate_password\n\ndef test_password_strength_constraints():\n    # Check password shorter than 8 chars\n    assert not validate_password('Short1!')\n    # Check password missing uppercase letter\n    assert not validate_password('no_uppercase1!')\n    # Check valid password\n    assert validate_password('ValidP@ss1')\n"
+    },
+    "TC-004": {
+      "framework": "karate",
+      "script": "Feature: Password Reset API\n\nBackground:\n  * url 'https://example.com/api'\n\nScenario: Trigger reset and verify dispatch\n  Given path 'auth/reset-password'\n  And request { email: 'qa_tester@example.com' }\n  When method post\n  Then status 200\n  And match response.status == 'success'\n"
+    }
+  },
+  "review_findings": [
+    {
+      "id": "RF-001",
+      "severity": "Medium",
+      "category": "Missing Validation",
+      "description": "Requirement REQ-005 (Session expiration after 30 minutes of inactivity) does not have any test case covering it. A test scenario for inactivity polling is required."
+    },
+    {
+      "id": "RF-002",
+      "severity": "Low",
+      "category": "Ambiguity",
+      "description": "The requirements do not define if the lockout duration is permanent (requires admin unlock) or temporary. Test scenario SC-002 assumes timed lockouts are not present."
+    }
+  ],
+  "quality_scores": {
+    "TC-001": {
+      "score": 9,
+      "reason": "Perfect happy path test case, includes mock data and database verification SQL query."
+    },
+    "TC-002": {
+      "score": 9,
+      "reason": "Clear sequence of steps showing transitions of state. Excellent SQL query coverage."
+    },
+    "TC-003": {
+      "score": 8,
+      "reason": "Accurately validates boundary password cases, steps are simple and assertions are clean."
+    },
+    "TC-004": {
+      "score": 8,
+      "reason": "Covers API request and polling logic. Well documented steps."
+    },
+    "TC-005": {
+      "score": 7,
+      "reason": "Manual test case covers injection vectors, could be expanded to list more automated test inputs."
+    }
+  },
+  "metrics": {
+    "total_input_tokens": 12450,
+    "total_output_tokens": 8200,
+    "total_cost": 0.05656,
+    "model_calls": [
+      {
+        "agent": "requirement_interpreter",
+        "model": "gpt-4o",
+        "prompt_tokens": 1820,
+        "completion_tokens": 1050,
+        "cost": 0.0075
+      },
+      {
+        "agent": "scenario_generator",
+        "model": "gpt-4o",
+        "prompt_tokens": 2040,
+        "completion_tokens": 850,
+        "cost": 0.0068
+      },
+      {
+        "agent": "testcase_generator",
+        "model": "gpt-4o",
+        "prompt_tokens": 2500,
+        "completion_tokens": 2200,
+        "cost": 0.0141
+      },
+      {
+        "agent": "coverage_agent",
+        "model": "local-chromadb",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost": 0.0
+      },
+      {
+        "agent": "automation_agent",
+        "model": "gpt-4o-mini",
+        "prompt_tokens": 3000,
+        "completion_tokens": 1500,
+        "cost": 0.00067
+      },
+      {
+        "agent": "review_agent",
+        "model": "gpt-4o",
+        "prompt_tokens": 3090,
+        "completion_tokens": 2600,
+        "cost": 0.0168
+      }
+    ],
+    "req_coverage_pct": 80.0,
+    "auto_coverage_pct": 80.0,
+    "risk_coverage_pct": 100.0,
+    "test_design_quality_score": 8.2,
+    "duplicate_test_cases": [],
+    "evaluation_scores": {
+      "coverage_completeness_pct": 80.0,
+      "requirement_understanding": {
+        "score": 9,
+        "reason": "Extracted requirements cover all points of user login, lockout rules, passwords, email, and inactivity policies. Entities are modeled properly."
+      },
+      "test_case_accuracy": {
+        "score": 9,
+        "reason": "Test cases accurately test login sequences, consecutive failed attempts, rules limits, and trigger resets. No irrelevant steps found."
+      },
+      "automation_script_validity_rate": 100.0,
+      "automation_script_validity": {
+        "TC-001": {
+          "valid": true,
+          "reason": "AST parsing successful. Valid Python syntax."
+        },
+        "TC-002": {
+          "valid": true,
+          "reason": "AST parsing successful. Valid Python syntax."
+        },
+        "TC-003": {
+          "valid": true,
+          "reason": "AST parsing successful. Valid Python syntax."
+        },
+        "TC-004": {
+          "valid": true,
+          "reason": "Valid Gherkin/Karate feature structure."
+        }
+      },
+      "hallucination_rate": 0.0,
+      "hallucination_details": {
+        "TC-001": {
+          "has_hallucination": "No",
+          "reason": "Credentials and redirection url correspond exactly to REQ-001."
+        },
+        "TC-002": {
+          "has_hallucination": "No",
+          "reason": "The lockout steps align directly with REQ-002."
+        },
+        "TC-003": {
+          "has_hallucination": "No",
+          "reason": "Rules boundaries are correct and align with REQ-003."
+        }
+      }
+    }
+  },
+  "errors": []
+}

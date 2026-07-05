@@ -1,0 +1,35 @@
+1
+00:00:00,000 --> 00:00:25,000
+In this video, I am going to walk through my project, the AI Test Architect Agent Platform. The goal is to take raw software requirements and automatically convert them into a complete QA deliverables package.
+
+2
+00:00:25,000 --> 00:00:55,000
+Manual test design is one of the most time-consuming parts of software quality assurance. QA teams need to understand business requirements, identify edge cases, map coverage, avoid duplicate tests, and prepare automation candidates.
+
+3
+00:00:55,000 --> 00:01:25,000
+The platform supports requirement input in PDF, Word, and plain text formats. From the Streamlit sidebar, the user can choose a model provider, upload requirements, preview input, and run the workflow.
+
+4
+00:01:25,000 --> 00:02:15,000
+The core of the project is a stateful LangGraph pipeline. The Requirement Interpreter extracts structured requirements, the Scenario Generator creates test scenarios, and the Test Case Generator expands them into detailed QA test cases.
+
+5
+00:02:15,000 --> 00:03:05,000
+The Coverage Agent builds a Requirement Traceability Matrix and identifies coverage gaps. It also uses ChromaDB for semantic duplicate detection. The Automation Agent then creates script drafts for Pytest, Playwright, Karate, or Cucumber.
+
+6
+00:03:05,000 --> 00:03:45,000
+The Review Agent behaves like a senior QA architect, flagging weak validations and assigning quality scores. After the main pipeline, an independent Evaluation Agent checks coverage, accuracy, hallucination risk, and script validity.
+
+7
+00:03:45,000 --> 00:04:25,000
+The dashboard shows parsed requirements, scenarios, test cases, traceability, duplicate analysis, automation scripts, review findings, quality scores, and performance metrics. Outputs can be exported to Excel, CSV, or Jira-compatible JSON.
+
+8
+00:04:25,000 --> 00:04:50,000
+The project is built with Python, LangGraph, Streamlit, OpenAI or Google Gemini, ChromaDB, PyMuPDF, python-docx, and openpyxl. The code is separated into dashboard, agents, shared state, utilities, prompts, and exporters.
+
+9
+00:04:50,000 --> 00:05:10,000
+To summarize, the AI Test Architect Agent Platform turns unstructured requirements into structured test assets with traceability, review, automation drafts, and evaluation. It helps QA teams start faster and review with more confidence.

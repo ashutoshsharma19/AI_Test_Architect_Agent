@@ -1,0 +1,11 @@
+langgraph
+streamlit
+openai
+google-genai
+chromadb
+pymupdf
+python-docx
+openpyxl
+pandas
+python-dotenv
+pytest
