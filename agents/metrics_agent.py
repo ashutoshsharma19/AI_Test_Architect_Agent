@@ -1,8 +1,10 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+from langchain_core.runnables import RunnableConfig
 from agents.state import AgentState
 from utils.normalizer import normalize_state
 
-def metrics_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str, Any]:
+def metrics_agent(state: AgentState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     """Agent 7: QA Metrics Agent. Computes KPI metrics for display in the dashboard."""
     safe_state = normalize_state(state)
     requirements = safe_state.get("requirements", [])
@@ -10,7 +12,7 @@ def metrics_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str,
     test_cases = safe_state.get("test_cases", [])
     rtm = safe_state.get("rtm", {})
     quality_scores = safe_state.get("quality_scores", {})
-    metrics = state.get("metrics") or {}
+    metrics = dict(state.get("metrics") or {})
     
     # 1. Requirement Coverage %
     total_reqs = len(requirements)

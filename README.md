@@ -22,13 +22,15 @@ An end-to-end agentic pipeline that autonomously converts software requirements 
 ```
 ai-test-architect-agent/
 ├── app.py                    # Streamlit main entry point & dashboard UI
+├── test_pipeline.py          # Live end-to-end smoke run against a real provider
 ├── requirements.txt          # Package dependencies
 ├── README.md                 # Setup & usage instructions (this file)
 ├── .env.example              # Example environment variables
 ├── agents/
 │   ├── __init__.py
-│   ├── state.py              # LangGraph AgentState TypedDict definition
-│   ├── graph.py              # LangGraph StateGraph pipeline wiring
+│   ├── state.py              # AgentState TypedDict + empty_state() factory
+│   ├── base.py               # Shared LLM-node plumbing (config, token/cost accounting, errors)
+│   ├── graph.py              # PIPELINE registry + LangGraph StateGraph wiring (HITL checkpoint)
 │   ├── requirement_agent.py  # Agent 1: Requirement Interpreter
 │   ├── scenario_agent.py     # Agent 2: Scenario Generator
 │   ├── testcase_agent.py     # Agent 3: Test Case Generator
@@ -40,9 +42,14 @@ ai-test-architect-agent/
 ├── utils/
 │   ├── document_parser.py    # PyMuPDF + python-docx parser helper
 │   ├── exporter.py           # Styled Excel, CSV, and Jira JSON exporters
+│   ├── llm.py                # OpenAI/Gemini client: retries with backoff, JSON parsing, pricing
+│   ├── normalizer.py         # Coerces loosely-structured LLM output into a stable schema
+│   ├── vector_store.py       # ChromaDB semantic duplicate detection (+ heuristic fallback)
 │   └── prompts.py            # Custom prompt templates for each agent node
+├── tests/                    # Offline pytest suite (scripted fake LLM, no API key needed)
 └── examples/
-    └── sample_requirements.txt  # Default test requirements demo text
+    ├── sample_requirements.txt  # Default test requirements demo text
+    └── sample_output/sample_run.json  # Pre-run state for "Load Pre-run Demo Data"
 ```
 
 ---
@@ -79,6 +86,31 @@ streamlit run app.py
 ```
 
 Open `http://localhost:8501` in your browser.
+
+### 4. Run the Tests
+
+The offline suite drives every agent, the compiled LangGraph graph (including the
+human-in-the-loop pause/resume) and the evaluator through a scripted fake LLM, so it
+needs no API key and makes no network calls:
+
+```bash
+pytest
+```
+
+For a live smoke run against your configured provider (costs a few cents):
+
+```bash
+python test_pipeline.py
+```
+
+### Optional settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MODEL_PROVIDER` | `openai` | Provider used by `test_pipeline.py` (`openai` or `gemini`) |
+| `MODEL_PRO` / `MODEL_FLASH` | per provider | Override the reasoning / speed models for `test_pipeline.py` |
+| `LLM_REQUEST_TIMEOUT` | `90` | Per-call timeout in seconds when none is passed explicitly |
+| `DUPLICATE_DISTANCE_THRESHOLD` | `0.075` | Cosine distance under which two test cases are flagged as duplicates |
 
 ---
 

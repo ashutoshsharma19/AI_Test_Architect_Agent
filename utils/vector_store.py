@@ -1,183 +1,147 @@
+import logging
 import os
-import chromadb
 import time
-from chromadb.api.types import Documents, Embeddings, EmbeddingFunction
-from openai import OpenAI
-from typing import List, Dict, Any, Tuple
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
 from utils.normalizer import normalize_test_cases
 
-class ProviderEmbeddingFunction(EmbeddingFunction):
-    """Custom embedding function for ChromaDB that uses the configured provider."""
-    def __init__(self, api_key: str = None, provider: str = "openai", model_name: str = None):
-        self.api_key = api_key
-        self.provider = (provider or "openai").lower()
-        self.model_name = model_name or (
-            "models/text-embedding-004" if self.provider == "gemini" else "text-embedding-3-small"
-        )
-        
-    def __call__(self, input: Documents) -> Embeddings:
-        try:
-            if self.provider == "gemini":
-                return self._embed_gemini(input)
-            return self._embed_openai(input)
-        except Exception as e:
-            print(f"{self.provider.title()} embeddings unavailable, using fallback duplicate detection embeddings: {e}")
-            # Fallback embedding (1536-dimensional based on simple hashing) to prevent pipeline crashes
-            embeddings = []
-            for text in input:
-                words = text.lower().split()
-                emb = [0.0] * 1536
-                for idx, w in enumerate(words):
-                    if idx < 1536:
-                        emb[idx] = float(hash(w) % 10000) / 10000.0
-                embeddings.append(emb)
-            return embeddings
+logger = logging.getLogger(__name__)
 
-    def _embed_openai(self, input: Documents) -> Embeddings:
-        key = self.api_key or os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise ValueError("OPENAI_API_KEY is not configured.")
-        timeout_seconds = float(os.getenv("OPENAI_EMBEDDING_TIMEOUT", "45"))
-        client = OpenAI(api_key=key, timeout=timeout_seconds)
-        started_at = time.perf_counter()
-        result = client.embeddings.create(
-            model=self.model_name,
-            input=list(input),
-            encoding_format="float"
-        )
-        print(f"OpenAI embeddings completed in {time.perf_counter() - started_at:.2f}s")
-        return [item.embedding for item in result.data]
+# Cosine distance below which two test cases are flagged as duplicates
+# (cosine similarity >= 0.925). Override with DUPLICATE_DISTANCE_THRESHOLD.
+DEFAULT_DUPLICATE_DISTANCE = 0.075
+NEIGHBOURS_PER_QUERY = 3
 
-    def _embed_gemini(self, input: Documents) -> Embeddings:
-        key = self.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+def _embedding_model(provider: str) -> str:
+    return "gemini-embedding-001" if provider == "gemini" else "text-embedding-3-small"
+
+
+def embed_texts(texts: List[str], api_key: Optional[str] = None, provider: str = "openai",
+                model_name: Optional[str] = None) -> List[List[float]]:
+    """Embed texts with the configured provider. Raises on any failure so callers can fall back."""
+    provider = (provider or "openai").lower()
+    model_name = model_name or _embedding_model(provider)
+    started_at = time.perf_counter()
+
+    if provider == "gemini":
+        key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not key:
             raise ValueError("GEMINI_API_KEY is not configured.")
-        try:
-            from google import genai
-        except ImportError as exc:
-            raise ImportError("Gemini provider requires the google-genai package. Install requirements.txt again.") from exc
+        from google import genai
 
-        client = genai.Client(api_key=key)
-        started_at = time.perf_counter()
-        result = client.models.embed_content(
-            model=self.model_name,
-            contents=list(input),
-        )
-        print(f"Gemini embeddings completed in {time.perf_counter() - started_at:.2f}s")
-        return [embedding.values for embedding in result.embeddings]
+        result = genai.Client(api_key=key).models.embed_content(model=model_name, contents=list(texts))
+        vectors = [list(embedding.values) for embedding in result.embeddings]
+    else:
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise ValueError("OPENAI_API_KEY is not configured.")
+        from openai import OpenAI
 
-def init_chroma_client(persist_directory: str = "./.chromadb") -> chromadb.ClientAPI:
-    """Initialize a persistent ChromaDB client."""
-    return chromadb.PersistentClient(path=persist_directory)
+        timeout_seconds = float(os.getenv("OPENAI_EMBEDDING_TIMEOUT", "45"))
+        client = OpenAI(api_key=key, timeout=timeout_seconds)
+        result = client.embeddings.create(model=model_name, input=list(texts), encoding_format="float")
+        vectors = [item.embedding for item in result.data]
 
-def find_duplicate_test_cases(test_cases: List[Dict[str, Any]], api_key: str = None, provider: str = "openai") -> List[Tuple[str, str, float]]:
+    logger.info("%s embeddings completed in %.2fs", provider, time.perf_counter() - started_at)
+    return vectors
+
+
+def _test_case_document(tc: Dict[str, Any]) -> str:
+    steps = " ".join(f"{s.get('action', '')} {s.get('expected_result', '')}" for s in tc.get("steps", []))
+    return f"Title: {tc.get('title', '')}\nPreconditions: {tc.get('preconditions', '')}\nSteps: {steps}"
+
+
+def find_duplicate_test_cases(
+    test_cases: List[Dict[str, Any]],
+    api_key: Optional[str] = None,
+    provider: str = "openai",
+    threshold: Optional[float] = None,
+) -> List[Tuple[str, str, float]]:
     """
-    Use ChromaDB to detect semantically duplicate/redundant test cases.
-    Returns:
-        List of tuples: (tc_id_1, tc_id_2, distance)
+    Use ChromaDB semantic search to detect duplicate/redundant test cases.
+    Returns a list of (tc_id_1, tc_id_2, cosine_distance) tuples.
+    Falls back to title-overlap heuristics if embeddings or ChromaDB are unavailable.
     """
+    test_cases = normalize_test_cases(test_cases)
     if len(test_cases) < 2:
         return []
-    test_cases = normalize_test_cases(test_cases)
-        
+    threshold = threshold if threshold is not None else float(
+        os.getenv("DUPLICATE_DISTANCE_THRESHOLD", DEFAULT_DUPLICATE_DISTANCE)
+    )
+
+    # De-duplicate IDs: Chroma rejects repeated IDs, and LLMs occasionally reuse them.
+    seen_ids = set()
+    ids, documents = [], []
+    for tc in test_cases:
+        tc_id = tc["test_case_id"]
+        if tc_id in seen_ids:
+            continue
+        seen_ids.add(tc_id)
+        ids.append(tc_id)
+        documents.append(_test_case_document(tc))
+    if len(ids) < 2:
+        return []
+
     try:
-        # Initialize client and embedding function
-        client = init_chroma_client()
-        emb_fn = ProviderEmbeddingFunction(api_key=api_key, provider=provider)
-        
-        # Reset or get collection
-        collection_name = "test_cases_eval"
-        try:
-            client.delete_collection(collection_name)
-        except Exception:
-            pass
-            
+        import chromadb
+
+        embeddings = embed_texts(documents, api_key=api_key, provider=provider)
+        # In-memory client + unique collection: concurrent Streamlit sessions cannot clobber each other.
+        client = chromadb.EphemeralClient()
         collection = client.create_collection(
-            name=collection_name,
-            embedding_function=emb_fn
+            name=f"test_cases_{uuid.uuid4().hex[:12]}",
+            metadata={"hnsw:space": "cosine"},
         )
-        
-        # Add test cases to ChromaDB
-        ids = []
-        documents = []
-        metadatas = []
-        
-        for tc in test_cases:
-            tc_id = tc.get("test_case_id", "")
-            title = tc.get("title", "")
-            precond = tc.get("preconditions", "")
-            steps = " ".join([s.get("action", "") + " " + s.get("expected_result", "") for s in tc.get("steps", [])])
-            
-            doc_content = f"Title: {title}\nPreconditions: {precond}\nSteps: {steps}"
-            
-            ids.append(tc_id)
-            documents.append(doc_content)
-            metadatas.append({"title": title})
-            
-        collection.add(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas
-        )
-        
-        duplicate_pairs = []
-        seen = set()
-        
-        # Query ChromaDB for similar test cases
-        for i, tc_id in enumerate(ids):
-            query_results = collection.query(
-                query_texts=[documents[i]],
-                n_results=min(3, len(ids))
+        try:
+            collection.add(ids=ids, documents=documents, embeddings=embeddings)
+            results = collection.query(
+                query_embeddings=embeddings,
+                n_results=min(NEIGHBOURS_PER_QUERY, len(ids)),
             )
-            
-            # The query results return distances. A very small distance indicates high similarity.
-            # In ChromaDB, L2 distance is default. Low distance = high similarity.
-            # L2 distance under 0.25 (or cosine distance depending on config) indicates likely duplicates.
-            results_ids = query_results.get("ids", [[]])[0]
-            distances = query_results.get("distances", [[]])[0]
-            
-            for other_id, dist in zip(results_ids, distances):
-                if other_id != tc_id:
-                    # Sort IDs to avoid duplicates (A, B) vs (B, A)
-                    pair = tuple(sorted([tc_id, other_id]))
-                    if pair not in seen and dist < 0.15: # threshold for duplicate
-                        seen.add(pair)
-                        duplicate_pairs.append((pair[0], pair[1], float(dist)))
-                        
+        finally:
+            try:
+                client.delete_collection(collection.name)
+            except Exception:  # noqa: BLE001 - cleanup is best effort
+                pass
+
+        duplicate_pairs: List[Tuple[str, str, float]] = []
+        seen_pairs = set()
+        for tc_id, neighbour_ids, distances in zip(ids, results["ids"], results["distances"]):
+            for other_id, dist in zip(neighbour_ids, distances):
+                if other_id == tc_id:
+                    continue
+                pair = tuple(sorted((tc_id, other_id)))
+                if pair not in seen_pairs and dist < threshold:
+                    seen_pairs.add(pair)
+                    duplicate_pairs.append((pair[0], pair[1], float(dist)))
         return duplicate_pairs
-        
-    except Exception as e:
-        print(f"Error in ChromaDB duplicate detection: {e}")
-        # Return fallback heuristic-based duplication checks (e.g. title word overlap)
+
+    except Exception as exc:  # noqa: BLE001 - never let duplicate detection break the pipeline
+        logger.warning("Semantic duplicate detection unavailable, using title-overlap fallback: %s", exc)
         return fallback_duplicate_detection(test_cases)
 
-def fallback_duplicate_detection(test_cases: List[Dict[str, Any]]) -> List[Tuple[str, str, float]]:
-    """Fallback Jaccard-similarity duplicate checker in case ChromaDB fails."""
+
+def fallback_duplicate_detection(test_cases: List[Dict[str, Any]], min_jaccard: float = 0.8) -> List[Tuple[str, str, float]]:
+    """Jaccard-similarity duplicate checker on test case titles, used when embeddings are unavailable."""
     test_cases = normalize_test_cases(test_cases)
-    duplicate_pairs = []
+    duplicate_pairs: List[Tuple[str, str, float]] = []
     seen = set()
-    
+
     for i in range(len(test_cases)):
+        words1 = set(test_cases[i]["title"].lower().split())
+        if not words1:
+            continue
         for j in range(i + 1, len(test_cases)):
-            tc1 = test_cases[i]
-            tc2 = test_cases[j]
-            
-            words1 = set(tc1.get("title", "").lower().split())
-            words2 = set(tc2.get("title", "").lower().split())
-            
-            if not words1 or not words2:
+            words2 = set(test_cases[j]["title"].lower().split())
+            if not words2:
                 continue
-                
-            intersection = words1.intersection(words2)
-            union = words1.union(words2)
-            jaccard = len(intersection) / len(union)
-            
-            if jaccard > 0.8: # high Jaccard similarity in title
-                id1 = tc1.get("test_case_id", "")
-                id2 = tc2.get("test_case_id", "")
-                pair = tuple(sorted([id1, id2]))
-                if pair not in seen:
+            jaccard = len(words1 & words2) / len(words1 | words2)
+            if jaccard > min_jaccard:
+                pair = tuple(sorted((test_cases[i]["test_case_id"], test_cases[j]["test_case_id"])))
+                if pair[0] != pair[1] and pair not in seen:
                     seen.add(pair)
                     duplicate_pairs.append((pair[0], pair[1], 1.0 - jaccard))
-                    
+
     return duplicate_pairs

@@ -70,47 +70,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Imports from project
+import tempfile
+
 from utils.document_parser import parse_document
 from utils.exporter import export_to_excel, export_to_csv, export_to_jira_format
 from utils.normalizer import normalize_state
-from agents.graph import get_pipeline_graph
+from agents.graph import PIPELINE, NODE_FUNCTIONS, INTERRUPT_BEFORE
 from agents.evaluation_agent import EvaluationAgent
+from agents.state import empty_state
 
 # Session State Initialization
 if "pipeline_state" not in st.session_state:
-    st.session_state.pipeline_state = {
-        "raw_input": "",
-        "requirements": [],
-        "business_rules": [],
-        "entities": [],
-        "assumptions": [],
-        "ambiguities": [],
-        "scenarios": [],
-        "test_cases": [],
-        "rtm": {},
-        "coverage_gaps": [],
-        "automation_scripts": {},
-        "review_findings": [],
-        "quality_scores": {},
-        "metrics": {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost": 0.0,
-            "model_calls": [],
-            "req_coverage_pct": 0.0,
-            "auto_coverage_pct": 0.0,
-            "risk_coverage_pct": 0.0,
-            "test_design_quality_score": 0.0,
-            "hallucination_rate": 0.0
-        },
-        "errors": []
-    }
+    st.session_state.pipeline_state = empty_state()
 
 if "step_index" not in st.session_state:
     st.session_state.step_index = 0
 
 if "run_mode" not in st.session_state:
-    st.session_state.run_mode = "idle" # "idle", "running_full", "running_step"
+    # "idle", "running_full", "awaiting_review", "running_step"
+    st.session_state.run_mode = "idle"
+
+if "resume_index" not in st.session_state:
+    st.session_state.resume_index = 0
 
 if "last_active_agent" not in st.session_state:
     st.session_state.last_active_agent = "Idle"
@@ -151,8 +132,8 @@ provider_settings = {
         "label": "Gemini API Key",
         "env": "GEMINI_API_KEY",
         "timeout_label": "Gemini Request Timeout (seconds)",
-        "reasoning_models": ["gemini-1.5-pro", "gemini-2.0-pro-exp-02-05", "gemini-2.5-pro"],
-        "speed_models": ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"],
+        "reasoning_models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+        "speed_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
     },
 }
 provider_config = provider_settings[model_provider]
@@ -178,12 +159,12 @@ request_timeout = st.sidebar.number_input(
 )
 
 model_pro = st.sidebar.selectbox(
-    "Reasoning Model (Agents 1-4, 6)",
+    "Reasoning Model (Agents 1-3, 6)",
     provider_config["reasoning_models"],
     index=0
 )
 model_flash = st.sidebar.selectbox(
-    "Speed Model (Agents 5, 7, Eval)",
+    "Speed Model (Agent 5, Eval)",
     provider_config["speed_models"],
     index=0
 )
@@ -199,20 +180,30 @@ text_input = st.sidebar.text_area(
     height=150
 )
 
+
+@st.cache_data(show_spinner=False)
+def _parse_upload(file_name: str, file_bytes: bytes) -> str:
+    """Parse an uploaded document via a private temp file (never trusts the client-supplied path)."""
+    suffix = os.path.splitext(os.path.basename(file_name))[1].lower()
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(file_bytes)
+        return parse_document(tmp_path).strip()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 # Set final input string. Uploaded documents take precedence over the sample text.
 raw_input_text = ""
 input_source = "Text box"
 input_warning = ""
 if uploaded_file is not None:
-    # Save file locally to parse
-    temp_dir = "./scratch"
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, uploaded_file.name)
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    
     with st.spinner(f"Parsing {uploaded_file.name}..."):
-        parsed_text = parse_document(file_path).strip()
+        parsed_text = _parse_upload(uploaded_file.name, uploaded_file.getvalue())
 
     if parsed_text and not parsed_text.startswith("Error") and not parsed_text.startswith("Unsupported"):
         raw_input_text = parsed_text
@@ -233,64 +224,34 @@ with st.sidebar.expander("Preview active requirements", expanded=False):
 
 # Toggles and Buttons
 step_by_step = st.sidebar.toggle("Run Step by Step", value=False)
-interrupt_enabled = st.sidebar.toggle("Human-in-the-Loop Interrupt", value=False)
+interrupt_enabled = st.sidebar.toggle(
+    "Human-in-the-Loop Interrupt",
+    value=False,
+    help="Pause the full run before the Senior QA Review so you can inspect generated artefacts."
+)
 st.sidebar.caption(f"Pipeline status: {st.session_state.last_active_agent}")
 
 # Control Actions
-if st.sidebar.button("🚀 Run Full Pipeline", disabled=not api_key):
+if st.sidebar.button("🚀 Run Full Pipeline", disabled=not api_key or not raw_input_text.strip()):
     st.session_state.run_mode = "running_full"
+    st.session_state.resume_index = 0
     st.session_state.step_index = 0
-    # Reset State
-    st.session_state.pipeline_state = {
-        "raw_input": raw_input_text,
-        "requirements": [],
-        "business_rules": [],
-        "entities": [],
-        "assumptions": [],
-        "ambiguities": [],
-        "scenarios": [],
-        "test_cases": [],
-        "rtm": {},
-        "coverage_gaps": [],
-        "automation_scripts": {},
-        "review_findings": [],
-        "quality_scores": {},
-        "metrics": {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost": 0.0,
-            "model_calls": [],
-            "req_coverage_pct": 0.0,
-            "auto_coverage_pct": 0.0,
-            "risk_coverage_pct": 0.0,
-            "test_design_quality_score": 0.0,
-            "hallucination_rate": 0.0
-        },
-        "errors": []
-    }
+    st.session_state.pipeline_state = empty_state(raw_input_text)
 
 if st.sidebar.button("📂 Load Pre-run Demo Data"):
     try:
-        with open("examples/sample_output/sample_run.json", "r") as f:
+        with open("examples/sample_output/sample_run.json", "r", encoding="utf-8") as f:
             demo_data = json.load(f)
-        st.session_state.pipeline_state = demo_data
+        st.session_state.pipeline_state = normalize_state(demo_data)
         st.session_state.step_index = 0
+        st.session_state.run_mode = "idle"
         st.toast("Loaded pre-run demo data successfully!", icon="📂")
         st.rerun()
     except Exception as e:
         st.sidebar.error(f"Failed to load demo data: {e}")
 
 # Step by Step flow handling
-pipeline_steps = [
-    ("Extract Requirements", "requirement_interpreter"),
-    ("Generate Scenarios", "scenario_generator"),
-    ("Generate Test Cases", "test_case_generator"),
-    ("Map Coverage (RTM)", "coverage_agent"),
-    ("Generate Automation Scripts", "automation_agent"),
-    ("Senior QA Review", "review_agent"),
-    ("Calculate QA Metrics", "metrics_agent"),
-    ("Post-Run Evaluation", "evaluation_agent")
-]
+pipeline_steps = [(label, name) for name, label, _ in PIPELINE] + [("Post-Run Evaluation", "evaluation_agent")]
 
 if step_by_step and st.session_state.step_index < len(pipeline_steps):
     step_name, node_name = pipeline_steps[st.session_state.step_index]
@@ -300,34 +261,8 @@ if step_by_step and st.session_state.step_index < len(pipeline_steps):
 if st.sidebar.button("🧹 Reset / Clear", type="secondary"):
     st.session_state.run_mode = "idle"
     st.session_state.step_index = 0
-    st.session_state.pipeline_state = {
-        "raw_input": "",
-        "requirements": [],
-        "business_rules": [],
-        "entities": [],
-        "assumptions": [],
-        "ambiguities": [],
-        "scenarios": [],
-        "test_cases": [],
-        "rtm": {},
-        "coverage_gaps": [],
-        "automation_scripts": {},
-        "review_findings": [],
-        "quality_scores": {},
-        "metrics": {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost": 0.0,
-            "model_calls": [],
-            "req_coverage_pct": 0.0,
-            "auto_coverage_pct": 0.0,
-            "risk_coverage_pct": 0.0,
-            "test_design_quality_score": 0.0,
-            "hallucination_rate": 0.0
-        },
-        "errors": []
-    }
-
+    st.session_state.resume_index = 0
+    st.session_state.pipeline_state = empty_state()
     st.rerun()
 
 
@@ -336,7 +271,6 @@ st.title("🛡️ AI Test Architect Agent Platform")
 st.markdown("An end-to-end multi-agent orchestration platform converting raw requirements into full QA deliverable packages.")
 
 # ----------------- PIPELINE EXECUTION ENGINE -----------------
-# Define Config dict
 run_config = {
     "configurable": {
         "api_key": api_key,
@@ -347,197 +281,105 @@ run_config = {
     }
 }
 
+
+def _make_evaluator() -> EvaluationAgent:
+    return EvaluationAgent(api_key=api_key, model_name=model_flash, request_timeout=request_timeout,
+                           model_provider=model_provider)
+
+
+def _run_node(node: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """Run one pipeline node and merge its update into a normalized copy of the state."""
+    try:
+        update = NODE_FUNCTIONS[node](state, run_config)
+        merged = {**state, **(update or {})}
+    except Exception as err:  # noqa: BLE001 - keep the UI alive and surface the error
+        merged = {**state, "errors": list(state.get("errors", [])) + [f"Node '{node}' crashed: {err}"]}
+    return normalize_state(merged)
+
+
+if st.session_state.run_mode == "awaiting_review":
+    st.warning(
+        "⏸️ Human-in-the-loop checkpoint: the pipeline paused before the Senior QA Review. "
+        "Inspect the requirements, scenarios, test cases and scripts in the tabs below, then resume."
+    )
+    resume_col, cancel_col = st.columns([1, 1])
+    if resume_col.button("▶️ Proceed to Review & Metrics", type="primary", disabled=not api_key):
+        st.session_state.run_mode = "running_full"
+        st.rerun()
+    if cancel_col.button("⏹️ Stop here"):
+        st.session_state.run_mode = "idle"
+        st.session_state.last_active_agent = "Idle"
+        st.rerun()
+
 if st.session_state.run_mode == "running_full":
-    # Compile graph
-    graph = get_pipeline_graph(interrupt=interrupt_enabled)
-    initial_state = {
-        "raw_input": raw_input_text,
-        "requirements": [],
-        "business_rules": [],
-        "entities": [],
-        "assumptions": [],
-        "ambiguities": [],
-        "scenarios": [],
-        "test_cases": [],
-        "rtm": {},
-        "coverage_gaps": [],
-        "automation_scripts": {},
-        "review_findings": [],
-        "quality_scores": {},
-        "metrics": {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost": 0.0,
-            "model_calls": [],
-            "req_coverage_pct": 0.0,
-            "auto_coverage_pct": 0.0,
-            "risk_coverage_pct": 0.0,
-            "test_design_quality_score": 0.0,
-            "hallucination_rate": 0.0
-        },
-        "errors": []
-    }
-    
-    # Progress tracker
     progress_bar = st.progress(0)
     status_box = st.status("Initializing Multi-Agent Pipeline...")
-    
-    # Nodes in execution order
-    nodes = [
-        "requirement_interpreter", 
-        "scenario_generator", 
-        "test_case_generator", 
-        "coverage_agent", 
-        "automation_agent", 
-        "review_agent", 
-        "metrics_agent"
-    ]
-    
-    current_state = initial_state
-    
-    # Run the graph sequentially for streaming updates in Streamlit UI
-    for idx, node in enumerate(nodes):
-        if interrupt_enabled and node == "review_agent":
-            status_box.warning("Interrupt triggered before Review Agent! Human review optional.")
-            if not st.button("Proceed to Review & Metrics"):
-                st.session_state.run_mode = "idle"
-                st.session_state.pipeline_state = current_state
-                st.stop()
-                
-        status_box.update(label=f"Executing Agent {idx+1}: {node.replace('_', ' ').title()}...", state="running")
+    nodes = [name for name, _, _ in PIPELINE]
+    total_steps = len(nodes) + 1
+    start_index = st.session_state.resume_index
+    current_state = st.session_state.pipeline_state
+
+    for idx in range(start_index, len(nodes)):
+        node = nodes[idx]
+        # Pause before the review only on a fresh pass; resuming continues past the checkpoint.
+        if interrupt_enabled and node == INTERRUPT_BEFORE and idx != start_index:
+            st.session_state.pipeline_state = current_state
+            st.session_state.resume_index = idx
+            st.session_state.run_mode = "awaiting_review"
+            st.session_state.last_active_agent = f"Paused before {node.replace('_', ' ').title()}"
+            st.rerun()
+
+        label = node.replace("_", " ").title()
+        status_box.update(label=f"Executing Agent {idx + 1}: {label}...", state="running")
         st.session_state.last_active_agent = node
-        st.caption(f"Currently executing: {node.replace('_', ' ').title()}")
-        progress_bar.progress((idx) / (len(nodes) + 1))
-        
-        # Invoke node function
-        try:
-            # We fetch node function from graph or run manually to allow intermediate streaming
-            # To ensure compatibility and ease of UI updates, we execute agent functions directly
-            if node == "requirement_interpreter":
-                from agents.requirement_agent import requirement_interpreter_agent
-                res = requirement_interpreter_agent(current_state, run_config)
-            elif node == "scenario_generator":
-                from agents.scenario_agent import scenario_agent
-                res = scenario_agent(current_state, run_config)
-            elif node == "test_case_generator":
-                from agents.testcase_agent import testcase_agent
-                res = testcase_agent(current_state, run_config)
-            elif node == "coverage_agent":
-                from agents.coverage_agent import coverage_agent
-                res = coverage_agent(current_state, run_config)
-            elif node == "automation_agent":
-                from agents.automation_agent import automation_agent
-                res = automation_agent(current_state, run_config)
-            elif node == "review_agent":
-                from agents.review_agent import review_agent
-                res = review_agent(current_state, run_config)
-            elif node == "metrics_agent":
-                from agents.metrics_agent import metrics_agent
-                res = metrics_agent(current_state, run_config)
-                
-            # Update state dict
-            current_state.update(res)
-            current_state = normalize_state(current_state)
-        except Exception as err:
-            current_state["errors"].append(f"Node '{node}' crashed: {str(err)}")
-            
+        progress_bar.progress(idx / total_steps)
+        current_state = _run_node(node, current_state)
+
     # Post-run: EvaluationAgent
     status_box.update(label="Executing Agent 8: Independent Post-Run Evaluator...", state="running")
-    progress_bar.progress((len(nodes)) / (len(nodes) + 1))
-    
+    progress_bar.progress(len(nodes) / total_steps)
     try:
         st.session_state.last_active_agent = "evaluation_agent"
-        eval_agent = EvaluationAgent(api_key=api_key, model_name=model_flash, request_timeout=request_timeout, model_provider=model_provider)
-        eval_metrics = eval_agent.evaluate_pipeline(current_state)
-        current_state.setdefault("metrics", {})
-        current_state["metrics"]["evaluation_scores"] = eval_metrics
-        current_state["metrics"]["hallucination_rate"] = eval_metrics.get("hallucination_rate", 0.0)
+        _make_evaluator().evaluate_pipeline(current_state)
     except Exception as err:
-        current_state["errors"].append(f"EvaluationAgent crashed: {str(err)}")
-        
-    status_box.update(label="Pipeline run completed successfully!", state="complete")
+        current_state["errors"].append(f"EvaluationAgent crashed: {err}")
+
+    has_errors = bool(current_state.get("errors"))
+    status_box.update(
+        label="Pipeline finished with errors - see the error log." if has_errors else "Pipeline run completed successfully!",
+        state="error" if has_errors else "complete",
+    )
     progress_bar.progress(1.0)
-    
+
     st.session_state.pipeline_state = current_state
     st.session_state.run_mode = "idle"
+    st.session_state.resume_index = 0
     st.session_state.last_active_agent = "Idle"
     st.session_state.step_index = 0
-    st.success("End-to-End QA Pipeline execution finished!")
+    if has_errors:
+        st.warning("Pipeline finished, but some agents reported errors.")
+    else:
+        st.success("End-to-End QA Pipeline execution finished!")
 
 elif st.session_state.run_mode == "running_step":
     step_name, node = pipeline_steps[st.session_state.step_index]
     current_state = st.session_state.pipeline_state
-
     if st.session_state.step_index == 0:
-        current_state = {
-            "raw_input": raw_input_text,
-            "requirements": [],
-            "business_rules": [],
-            "entities": [],
-            "assumptions": [],
-            "ambiguities": [],
-            "scenarios": [],
-            "test_cases": [],
-            "rtm": {},
-            "coverage_gaps": [],
-            "automation_scripts": {},
-            "review_findings": [],
-            "quality_scores": {},
-            "metrics": {
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_cost": 0.0,
-                "model_calls": [],
-                "req_coverage_pct": 0.0,
-                "auto_coverage_pct": 0.0,
-                "risk_coverage_pct": 0.0,
-                "test_design_quality_score": 0.0,
-                "hallucination_rate": 0.0
-            },
-            "errors": []
-        }
-    
+        current_state = empty_state(raw_input_text)
+
     with st.spinner(f"Running step: {step_name}..."):
-        try:
-            st.session_state.last_active_agent = node
-            if node == "requirement_interpreter":
-                from agents.requirement_agent import requirement_interpreter_agent
-                res = requirement_interpreter_agent(current_state, run_config)
-            elif node == "scenario_generator":
-                from agents.scenario_agent import scenario_agent
-                res = scenario_agent(current_state, run_config)
-            elif node == "test_case_generator":
-                from agents.testcase_agent import testcase_agent
-                res = testcase_agent(current_state, run_config)
-            elif node == "coverage_agent":
-                from agents.coverage_agent import coverage_agent
-                res = coverage_agent(current_state, run_config)
-            elif node == "automation_agent":
-                from agents.automation_agent import automation_agent
-                res = automation_agent(current_state, run_config)
-            elif node == "review_agent":
-                from agents.review_agent import review_agent
-                res = review_agent(current_state, run_config)
-            elif node == "metrics_agent":
-                from agents.metrics_agent import metrics_agent
-                res = metrics_agent(current_state, run_config)
-            elif node == "evaluation_agent":
-                eval_agent = EvaluationAgent(api_key=api_key, model_name=model_flash, request_timeout=request_timeout, model_provider=model_provider)
-                res_eval = eval_agent.evaluate_pipeline(current_state)
-                current_state.setdefault("metrics", {})
-                current_state["metrics"]["evaluation_scores"] = res_eval
-                current_state["metrics"]["hallucination_rate"] = res_eval.get("hallucination_rate", 0.0)
-                res = {"metrics": current_state["metrics"]}
-                
-            current_state.update(res)
-            current_state = normalize_state(current_state)
-            st.session_state.pipeline_state = current_state
-            st.session_state.step_index += 1
-            st.toast(f"Finished {step_name} step!", icon="✅")
-        except Exception as err:
-            st.session_state.pipeline_state["errors"].append(f"Step '{step_name}' crashed: {str(err)}")
-            st.error(f"Error during step: {err}")
-            
+        st.session_state.last_active_agent = node
+        if node == "evaluation_agent":
+            try:
+                _make_evaluator().evaluate_pipeline(current_state)
+            except Exception as err:
+                current_state["errors"].append(f"Step '{step_name}' crashed: {err}")
+        else:
+            current_state = _run_node(node, current_state)
+
+    st.session_state.pipeline_state = current_state
+    st.session_state.step_index += 1
+    st.toast(f"Finished {step_name} step!", icon="✅")
     st.session_state.run_mode = "idle"
     st.session_state.last_active_agent = "Idle"
 

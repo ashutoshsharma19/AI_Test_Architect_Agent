@@ -1,143 +1,84 @@
+"""
+Live end-to-end smoke run against a real LLM provider.
+
+    python test_pipeline.py            # uses MODEL_PROVIDER (default: openai) from .env
+
+Writes the resulting state to examples/sample_output/sample_run.json, which the
+Streamlit app can load via "Load Pre-run Demo Data". For offline tests run `pytest`.
+"""
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
 
-# Ensure workspace is in Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 load_dotenv()
 
-from agents.graph import get_pipeline_graph
-from agents.evaluation_agent import EvaluationAgent
+from agents.evaluation_agent import EvaluationAgent  # noqa: E402
+from agents.graph import PIPELINE  # noqa: E402
+from agents.state import empty_state  # noqa: E402
+from utils.llm import default_model  # noqa: E402
+from utils.normalizer import normalize_state  # noqa: E402
 
-def main():
+RAW_INPUT = (
+    "The user login system shall allow registered users to log in using "
+    "email and password. The system shall lock the account after 3 "
+    "consecutive failed login attempts. Password must be minimum 8 "
+    "characters with at least one uppercase, one number, and one special "
+    "character. Session shall expire after 30 minutes."
+)
+
+
+def main() -> int:
     model_provider = os.getenv("MODEL_PROVIDER", "openai").lower()
-    if model_provider == "gemini":
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        model_pro = os.getenv("MODEL_PRO", "gemini-1.5-pro")
-        model_flash = os.getenv("MODEL_FLASH", "gemini-1.5-flash")
-        key_name = "GEMINI_API_KEY"
-    else:
-        api_key = os.getenv("OPENAI_API_KEY")
-        model_pro = os.getenv("MODEL_PRO", "gpt-4o")
-        model_flash = os.getenv("MODEL_FLASH", "gpt-4o-mini")
-        key_name = "OPENAI_API_KEY"
-
+    key_name = "GEMINI_API_KEY" if model_provider == "gemini" else "OPENAI_API_KEY"
+    api_key = os.getenv(key_name) or (os.getenv("GOOGLE_API_KEY") if model_provider == "gemini" else None)
     if not api_key:
         print(f"Warning: {key_name} environment variable not found. Skipping live API execution.")
-        print("Please check your .env file or environment settings.")
-        return
-        
-    print("Testing end-to-end agentic pipeline...")
-    raw_input = (
-        "The user login system shall allow registered users to log in using "
-        "email and password. The system shall lock the account after 3 "
-        "consecutive failed login attempts. Password must be minimum 8 "
-        "characters with at least one uppercase, one number, and one special "
-        "character. Session shall expire after 30 minutes."
-    )
-    
-    state = {
-        "raw_input": raw_input,
-        "requirements": [],
-        "business_rules": [],
-        "entities": [],
-        "assumptions": [],
-        "ambiguities": [],
-        "scenarios": [],
-        "test_cases": [],
-        "rtm": {},
-        "coverage_gaps": [],
-        "automation_scripts": {},
-        "review_findings": [],
-        "quality_scores": {},
-        "metrics": {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost": 0.0,
-            "model_calls": [],
-            "req_coverage_pct": 0.0,
-            "auto_coverage_pct": 0.0,
-            "risk_coverage_pct": 0.0,
-            "test_design_quality_score": 0.0,
-            "hallucination_rate": 0.0
-        },
-        "errors": []
-    }
-    
-    from agents.requirement_agent import requirement_interpreter_agent
-    from agents.scenario_agent import scenario_agent
-    from agents.testcase_agent import testcase_agent
-    from agents.coverage_agent import coverage_agent
-    from agents.automation_agent import automation_agent
-    from agents.review_agent import review_agent
-    from agents.metrics_agent import metrics_agent
-    
-    run_config = {
-        "configurable": {
-            "api_key": api_key,
-            "model_provider": model_provider,
-            "model_pro": model_pro,
-            "model_flash": model_flash,
-            "request_timeout": 90,
-        }
-    }
-    
-    print("\nRunning Requirement Interpreter...")
-    res = requirement_interpreter_agent(state, run_config)
-    state.update(res)
-    print(f"Requirements: {len(state['requirements'])}")
-    print(f"Business Rules: {len(state['business_rules'])}")
-    print(f"Entities: {len(state['entities'])}")
-    
-    print("\nRunning Scenario Generator...")
-    res = scenario_agent(state, run_config)
-    state.update(res)
-    print(f"Scenarios: {len(state['scenarios'])}")
-    
-    print("\nRunning Test Case Generator...")
-    res = testcase_agent(state, run_config)
-    state.update(res)
-    print(f"Test Cases: {len(state['test_cases'])}")
-    
-    print("\nRunning Coverage Agent...")
-    res = coverage_agent(state, run_config)
-    state.update(res)
-    print(f"RTM Coverage: {state['metrics'].get('coverage_percentage')}%")
-    print(f"Coverage Gaps: {state['coverage_gaps']}")
-    print(f"Duplicate Pairs: {len(state['metrics'].get('duplicate_test_cases', []))}")
-    
-    print("\nRunning Automation Agent...")
-    res = automation_agent(state, run_config)
-    state.update(res)
-    print(f"Automation Scripts generated: {len(state['automation_scripts'])}")
-    
-    print("\nRunning Review Agent...")
-    res = review_agent(state, run_config)
-    state.update(res)
-    print(f"Review Findings: {len(state['review_findings'])}")
-    print(f"Overall Quality Score: {state['metrics'].get('overall_quality_score')}")
-    
-    print("\nRunning Metrics Agent...")
-    res = metrics_agent(state, run_config)
-    state.update(res)
-    
+        return 0
+
+    model_pro = os.getenv("MODEL_PRO", default_model(model_provider, "pro"))
+    model_flash = os.getenv("MODEL_FLASH", default_model(model_provider, "flash"))
+    run_config = {"configurable": {
+        "api_key": api_key,
+        "model_provider": model_provider,
+        "model_pro": model_pro,
+        "model_flash": model_flash,
+        "request_timeout": 90,
+    }}
+
+    print(f"Testing end-to-end agentic pipeline ({model_provider}: {model_pro} / {model_flash})...")
+    state = empty_state(RAW_INPUT)
+    for name, label, fn in PIPELINE:
+        print(f"\nRunning {label} ({name})...")
+        state = normalize_state({**state, **fn(state, run_config)})
+
+    print(f"\nRequirements: {len(state['requirements'])} | Scenarios: {len(state['scenarios'])} | "
+          f"Test cases: {len(state['test_cases'])} | Scripts: {len(state['automation_scripts'])}")
+    print(f"Requirement coverage: {state['metrics'].get('req_coverage_pct')}% | Gaps: {state['coverage_gaps']}")
+    print(f"Overall quality score: {state['metrics'].get('overall_quality_score')}")
+
     print("\nRunning Evaluation Agent...")
-    eval_agent = EvaluationAgent(api_key=api_key, model_name=model_flash, request_timeout=90, model_provider=model_provider)
-    eval_metrics = eval_agent.evaluate_pipeline(state)
-    print("\nIndependent Evaluation Metrics:")
+    eval_metrics = EvaluationAgent(api_key=api_key, model_name=model_flash, request_timeout=90,
+                                   model_provider=model_provider).evaluate_pipeline(state)
     print(f" - Coverage Completeness: {eval_metrics.get('coverage_completeness_pct')}%")
-    print(f" - Req Understanding Score: {eval_metrics.get('requirement_understanding', {}).get('score')}/10")
-    print(f" - Test Case Accuracy Score: {eval_metrics.get('test_case_accuracy', {}).get('score')}/10")
+    print(f" - Req Understanding Score: {eval_metrics['requirement_understanding']['score']}/10")
+    print(f" - Test Case Accuracy Score: {eval_metrics['test_case_accuracy']['score']}/10")
     print(f" - Automation Syntax Validity Rate: {eval_metrics.get('automation_script_validity_rate')}%")
     print(f" - Hallucination Rate: {eval_metrics.get('hallucination_rate')}%")
-    
-    # Save the output to sample_output for demo caching
+    print(f" - Total cost: ${state['metrics'].get('total_cost', 0):.4f}")
+
     os.makedirs("examples/sample_output", exist_ok=True)
-    with open("examples/sample_output/sample_run.json", "w") as f:
+    with open("examples/sample_output/sample_run.json", "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
     print("\nSample outputs saved to examples/sample_output/sample_run.json")
 
+    if state["errors"]:
+        print("\nErrors:\n - " + "\n - ".join(state["errors"]))
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

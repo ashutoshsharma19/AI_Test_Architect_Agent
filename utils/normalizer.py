@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List
 
 
@@ -15,6 +16,20 @@ def _as_dict(value: Any, text_key: str = "text") -> Dict[str, Any]:
 
 def _string_list(value: Any) -> List[str]:
     return [str(item) for item in _as_list(value) if str(item).strip()]
+
+
+def _to_score(value: Any, default: float = 0.0) -> float:
+    """Coerce an LLM-supplied score ("8", "8/10", 8.5, None) into a float clamped to 0-10."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        match = re.search(r"-?\d+(?:\.\d+)?", str(value or ""))
+        if not match:
+            return default
+        number = float(match.group())
+    return max(0.0, min(10.0, number))
 
 
 def normalize_requirements(requirements: Any) -> List[Dict[str, Any]]:
@@ -124,7 +139,7 @@ def normalize_quality_scores(scores: Any) -> Dict[str, Dict[str, Any]]:
     for key, value in scores.items():
         score = _as_dict(value, text_key="reason")
         normalized[str(key)] = {
-            "score": score.get("score", 0),
+            "score": _to_score(score.get("score", 0)),
             "reason": str(score.get("reason") or ""),
         }
     return normalized
@@ -148,6 +163,7 @@ def normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized["requirements"] = normalize_requirements(normalized.get("requirements", []))
     normalized["business_rules"] = normalize_business_rules(normalized.get("business_rules", []))
     normalized["entities"] = normalize_entities(normalized.get("entities", []))
+    normalized["validations"] = _as_list(normalized.get("validations", []))
     normalized["scenarios"] = normalize_scenarios(normalized.get("scenarios", []))
     normalized["test_cases"] = normalize_test_cases(normalized.get("test_cases", []))
     normalized["review_findings"] = normalize_review_findings(normalized.get("review_findings", []))

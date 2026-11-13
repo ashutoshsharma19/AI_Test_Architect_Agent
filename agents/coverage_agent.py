@@ -1,5 +1,7 @@
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
+
+from langchain_core.runnables import RunnableConfig
 from agents.state import AgentState
 from utils.vector_store import find_duplicate_test_cases
 from utils.normalizer import normalize_state
@@ -11,6 +13,8 @@ STOP_WORDS = {
     "such", "system", "the", "their", "them", "to", "using", "user", "users",
     "when", "where", "with"
 }
+# Minimum share of a requirement's keywords a test case must mention to be linked to it.
+SEMANTIC_MATCH_THRESHOLD = 0.25
 
 
 def _tokens(text: str) -> set:
@@ -54,7 +58,7 @@ def _best_requirement_match(tc: Dict[str, Any], requirements: List[Dict[str, Any
             best_score = score
     return best_req_id, best_score
 
-def coverage_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str, Any]:
+def coverage_agent(state: AgentState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     """
     Agent 4: Coverage Agent.
     - Maps requirements to test cases (RTM)
@@ -69,8 +73,6 @@ def coverage_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str
     safe_state = normalize_state(state)
     requirements = safe_state.get("requirements", [])
     test_cases = safe_state.get("test_cases", [])
-    errors = state.get("errors") or []
-    
     # 1. Build RTM mapping only for extracted requirements. Generated test cases
     # can sometimes reference extra/malformed req_ids, but those must not inflate
     # requirement coverage above 100%.
@@ -84,34 +86,42 @@ def coverage_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str
     unmapped_test_cases = []
     semantic_mappings = []
     
+    def _link(req_id: str, tc_id: str) -> None:
+        if tc_id not in rtm[req_id]:
+            rtm[req_id].append(tc_id)
+
     for tc in test_cases:
         req_id = tc.get("req_id")
         tc_id = tc.get("test_case_id")
-        if req_id and tc_id:
-            if req_id in known_req_ids:
-                rtm[req_id].append(tc_id)
-            else:
-                scenario_req_id = scenario_to_req.get(tc.get("scenario_id"))
-                if scenario_req_id:
-                    rtm[scenario_req_id].append(tc_id)
-                    semantic_mappings.append({
-                        "test_case_id": tc_id,
-                        "original_req_id": req_id,
-                        "mapped_req_id": scenario_req_id,
-                        "basis": "scenario_id"
-                    })
-                else:
-                    matched_req_id, score = _best_requirement_match(tc, requirements)
-                    if matched_req_id and score >= 0.25:
-                        rtm[matched_req_id].append(tc_id)
-                        semantic_mappings.append({
-                            "test_case_id": tc_id,
-                            "original_req_id": req_id,
-                            "mapped_req_id": matched_req_id,
-                            "basis": f"semantic_overlap:{score:.2f}"
-                        })
-                    else:
-                        unmapped_test_cases.append({"test_case_id": tc_id, "req_id": req_id})
+        if not tc_id:
+            continue
+        if req_id in known_req_ids:
+            _link(req_id, tc_id)
+            continue
+
+        # Missing or unknown req_id: recover the link via the parent scenario, then via text overlap.
+        scenario_req_id = scenario_to_req.get(tc.get("scenario_id"))
+        if scenario_req_id:
+            _link(scenario_req_id, tc_id)
+            semantic_mappings.append({
+                "test_case_id": tc_id,
+                "original_req_id": req_id,
+                "mapped_req_id": scenario_req_id,
+                "basis": "scenario_id"
+            })
+            continue
+
+        matched_req_id, score = _best_requirement_match(tc, requirements)
+        if matched_req_id and score >= SEMANTIC_MATCH_THRESHOLD:
+            _link(matched_req_id, tc_id)
+            semantic_mappings.append({
+                "test_case_id": tc_id,
+                "original_req_id": req_id,
+                "mapped_req_id": matched_req_id,
+                "basis": f"semantic_overlap:{score:.2f}"
+            })
+        else:
+            unmapped_test_cases.append({"test_case_id": tc_id, "req_id": req_id})
             
     # 2. Detect coverage gaps (requirements with zero test cases mapped)
     coverage_gaps = [req_id for req_id, tc_list in rtm.items() if len(tc_list) == 0]
@@ -125,7 +135,7 @@ def coverage_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str
         duplicate_pairs.append({
             "tc1": id1,
             "tc2": id2,
-            "similarity_score": round(1.0 - score, 2) # convert distance to similarity metric
+            "similarity_score": round(1.0 - score, 2)  # cosine distance -> similarity
         })
         
     # Calculate coverage metrics
@@ -133,8 +143,7 @@ def coverage_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str
     covered_reqs = total_reqs - len(coverage_gaps)
     coverage_percentage = (covered_reqs / total_reqs * 100) if total_reqs > 0 else 0.0
     
-    # Write to a helper dict in state if needed, or directly in metrics
-    metrics = state.get("metrics") or {}
+    metrics = dict(state.get("metrics") or {})
     metrics["coverage_percentage"] = round(coverage_percentage, 2)
     metrics["duplicate_test_cases"] = duplicate_pairs
     metrics["total_requirements"] = total_reqs
@@ -146,5 +155,4 @@ def coverage_agent(state: AgentState, config: Dict[str, Any] = None) -> Dict[str
         "rtm": rtm,
         "coverage_gaps": coverage_gaps,
         "metrics": metrics,
-        "errors": errors
     }
